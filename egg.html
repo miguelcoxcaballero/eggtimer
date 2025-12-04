@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>3D Photorealistic Pomodoro Timer</title>
+<style>
+    body {
+        margin: 0;
+        padding: 0;
+        overflow: hidden;
+        background-color: #e0e0e0;
+        font-family: 'Helvetica Neue', Arial, sans-serif;
+        user-select: none;
+        -webkit-user-select: none;
+    }
+
+    #canvas-container {
+        width: 100vw;
+        height: 100vh;
+        display: block;
+    }
+
+    #ui-overlay {
+        position: absolute;
+        bottom: 50px;
+        width: 100%;
+        text-align: center;
+        color: rgba(0, 0, 0, 0.3);
+        pointer-events: none;
+        font-size: 14px;
+        letter-spacing: 1px;
+        font-weight: bold;
+        transition: opacity 0.5s;
+    }
+
+    #tooltip {
+        position: absolute;
+        top: 10%;
+        width: 100%;
+        text-align: center;
+        color: rgba(0, 0, 0, 0.5);
+        font-size: 24px;
+        font-weight: 300;
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.3s;
+    }
+
+    .loading {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        color: #333;
+        font-size: 24px;
+    }
+
+    /* --- LOGO WATERMARK STYLE --- */
+    #watermark {
+        position: absolute;
+        bottom: 10px;
+        left: 10px;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 5px 10px;
+        background: rgba(255, 255, 255, 0.2);
+        border-radius: 8px;
+        color: #111111;
+        font-size: 12px;
+        font-weight: 500;
+        opacity: 0.8;
+        pointer-events: none; /* Ignore mouse events */
+    }
+    #watermark svg {
+        height: 12px;
+        width: 15px;
+        stroke: #cc0000; /* Matching pointer red */
+        stroke-width: 5;
+    }
+</style>
+<!-- Import Three.js -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+<div id="loading" class="loading">Loading Timer...</div>
+<div id="canvas-container"></div>
+<div id="tooltip">00:00</div>
+<div id="ui-overlay">DRAG TOP TO SET</div>
+
+<!-- Inhouse Software Logo Watermark -->
+<div id="watermark">
+    <svg viewBox="0 0 100 60" fill="none" stroke="currentColor" stroke-width="4">
+        <path d="M5 55 L50 10 L95 55" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    Inhouse Software
+</div>
+
+<script>
+/**
+ * AUDIO SYSTEM
+ * - Tick/tock: mouse-click style, noise only (no pitched osc).
+ * - Ring: classic digital alarm.
+ */
+class SoundEngine {
+    constructor() {
+        this.ctx = null;
+        this.initialized = false;
+        this.tickToggle = false;   // false = tick, true = tock
+        this.clickBuffer = null;   // shared noise buffer for clicks
+    }
+
+    init() {
+        if (this.initialized) return;
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        this.ctx = new AudioContext();
+        this.initialized = true;
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+        this._createClickBuffer();
+    }
+
+    _createClickBuffer() {
+        if (!this.ctx || this.clickBuffer) return;
+        const sampleRate = this.ctx.sampleRate;
+        const length = Math.floor(sampleRate * 0.02); // ~20 ms of noise
+        const buffer = this.ctx.createBuffer(1, length, sampleRate);
+        const data = buffer.getChannelData(0);
+
+        // Short white noise burst with very fast decay.
+        for (let i = 0; i < length; i++) {
+            const env = 1 - i / length;    // linear decay
+            data[i] = (Math.random() * 2 - 1) * env;
+        }
+
+        this.clickBuffer = buffer;
+    }
+
+    /**
+     * Mouse-click style sound:
+     * - High-passed noise only
+     * - Very short envelope
+     * variant 0 = tick, 1 = tock (subtle differences)
+     */
+    _mouseClick(time, variant) {
+        const ctx = this.ctx;
+        const src = ctx.createBufferSource();
+        src.buffer = this.clickBuffer;
+
+        const filter = ctx.createBiquadFilter();
+        filter.type = 'highpass';
+        // Slight difference in cutoff so tick/tock feel a bit different,
+        // but not “pitchy”.
+        filter.frequency.setValueAtTime(variant ? 1800 : 2300, time);
+        filter.Q.setValueAtTime(0.7, time);
+
+        const gain = ctx.createGain();
+        gain.gain.setValueAtTime(0.0, time);
+        // Very fast attack then quick decay – feels like a mechanical click.
+        const peak = time + 0.002;
+        const release = time + 0.03;
+        gain.gain.linearRampToValueAtTime(variant ? 0.45 : 0.55, peak);
+        gain.gain.exponentialRampToValueAtTime(0.001, release);
+
+        src.connect(filter);
+        filter.connect(gain);
+        gain.connect(ctx.destination);
+
+        src.start(time);
+        src.stop(time + 0.04);
+    }
+
+    /**
+     * Alternating tick/tock using mouse-click sound.
+     */
+    playTick() {
+        if (!this.initialized || !this.clickBuffer) return;
+        const t = this.ctx.currentTime;
+        this._mouseClick(t, this.tickToggle ? 1 : 0);
+        this.tickToggle = !this.tickToggle;
+    }
+
+    /**
+     * Classic alarm clock style: square double-tone with pulsed amplitude.
+     */
+    playRing() {
+        if (!this.initialized) return;
+
+        const t = this.ctx.currentTime;
+        const duration = 4.0; // total alarm length in seconds
+
+        const osc1 = this.ctx.createOscillator();
+        const osc2 = this.ctx.createOscillator();
+        osc1.type = 'square';
+        osc2.type = 'square';
+
+        // Alarm-ish frequencies
+        osc1.frequency.setValueAtTime(900, t);
+        osc2.frequency.setValueAtTime(1200, t);
+
+        const gain = this.ctx.createGain();
+        gain.gain.setValueAtTime(0, t);
+
+        const pulsePeriod = 0.4;  // time between pulses
+        const attack = 0.01;
+        const hold = 0.18;
+
+        let currentTime = t;
+        while (currentTime < t + duration) {
+            const onTime = currentTime;
+            const peakTime = onTime + attack;
+            const offTime = onTime + hold;
+
+            gain.gain.setValueAtTime(0.0, onTime);
+            gain.gain.linearRampToValueAtTime(0.9, peakTime);
+            gain.gain.linearRampToValueAtTime(0.0, offTime);
+
+            currentTime += pulsePeriod;
+        }
+
+        osc1.connect(gain);
+        osc2.connect(gain);
+        gain.connect(this.ctx.destination);
+
+        osc1.start(t);
+        osc2.start(t);
+        osc1.stop(t + duration + 0.1);
+        osc2.stop(t + duration + 0.1);
+    }
+}
+
+const audio = new SoundEngine();
+
+/**
+ * SCENE SETUP
+ */
+const container = document.getElementById('canvas-container');
+const tooltip = document.getElementById('tooltip');
+const overlay = document.getElementById('ui-overlay');
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xd0d0d0);
+scene.fog = new THREE.Fog(0xd0d0d0, 20, 60);
+
+// CONSTANTS FOR EGG GEOMETRY
+const eggHeight = 6.2;
+const splitHeight = 2.6;
+const arrowHeight = splitHeight - 0.35; // local Y position of the red pointer's tip
+
+// Vertical offset of the whole timer group in world space
+const timerGroupY = -3.0;
+
+// --- CAMERA CONFIGURATION ---
+
+// 1. Start (full-egg) view
+const startFov = 60;
+const startLookAt = new THREE.Vector3(0, 2.5, 0);
+const startCamPos = new THREE.Vector3(0, 7.5, 13.5);
+
+// 2. Zoom View Parameters (computed so pointer + dial are nicely framed)
+
+// World Y of pointer tip and dial ring
+const pointerWorldY = timerGroupY + arrowHeight;     // ~ -0.75
+const dialWorldY    = timerGroupY + splitHeight;     // ~ -0.40
+
+// Center of the focus between pointer and dial
+const zoomCenterY = (pointerWorldY + dialWorldY) * 0.5; // ~ -0.575
+
+// Less zoom (wider angle) than before, but still closer than start view
+const zoomFov = 40;
+
+// Look directly at the mid point between numbers and red triangle
+const zoomLookAt = new THREE.Vector3(0, zoomCenterY, 0);
+
+// Place camera a bit above and in front of that region
+const zoomCamPos = new THREE.Vector3(
+    0,
+    zoomCenterY + 2.0, // slightly above
+    8.5                // farther than before for softer zoom
+);
+
+const camera = new THREE.PerspectiveCamera(startFov, window.innerWidth / window.innerHeight, 0.1, 100);
+camera.position.copy(startCamPos);
+camera.lookAt(startLookAt);
+
+// Animation State
+const currentCamPos = startCamPos.clone();
+const currentLookAt = startLookAt.clone();
+let currentFov = startFov;
+
+const targetCamPos = startCamPos.clone();
+const targetLookAt = startLookAt.clone();
+let targetFov = startFov;
+
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.physicallyCorrectLights = true;
+renderer.outputEncoding = THREE.sRGBEncoding;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+container.appendChild(renderer.domElement);
+
+/**
+ * LIGHTING
+ */
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambientLight);
+
+const keyLight = new THREE.RectAreaLight(0xffffff, 4, 10, 10);
+keyLight.position.set(5, 10, 10);
+keyLight.lookAt(0, 0, 0);
+scene.add(keyLight);
+
+const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+dirLight.position.set(5, 10, 5);
+dirLight.castShadow = true;
+dirLight.shadow.mapSize.width = 2048;
+dirLight.shadow.mapSize.height = 2048;
+dirLight.shadow.bias = -0.0005;
+dirLight.shadow.radius = 4;
+scene.add(dirLight);
+
+const rimLight = new THREE.SpotLight(0xddeeff, 2);
+rimLight.position.set(-10, 5, -5);
+rimLight.lookAt(0, 2, 0);
+scene.add(rimLight);
+
+/**
+ * TEXTURE GENERATION
+ */
+function createNoiseTexture() {
+    const size = 1024;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    const imgData = ctx.createImageData(size, size);
+    const data = imgData.data;
+
+    for (let i = 0; i < data.length; i += 4) {
+        const val = Math.floor(Math.random() * 255);
+        data[i] = val;
+        data[i + 1] = val;
+        data[i + 2] = val;
+        data[i + 3] = 255;
+    }
+    ctx.putImageData(imgData, 0, 0);
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.wrapT = THREE.RepeatWrapping;
+    tex.anisotropy = 16;
+    tex.minFilter = THREE.LinearFilter;
+    return tex;
+}
+
+const noiseTexBottom = createNoiseTexture();
+const noiseTexTop = createNoiseTexture();
+
+const density = 0.6;
+// Coarser grain on bottom
+noiseTexBottom.repeat.set(2, 2 * density);
+// Finer grain on top dial
+noiseTexTop.repeat.set(12, 12 * density);
+
+/**
+ * MATERIALS
+ */
+const matteWhite = new THREE.MeshStandardMaterial({
+    color: 0xeeeeee,
+    roughness: 0.65,
+    metalness: 0.0,
+    bumpMap: noiseTexBottom,
+    bumpScale: 0.018,
+    side: THREE.DoubleSide
+});
+
+const innerMatte = matteWhite;
+
+const redMatte = new THREE.MeshStandardMaterial({
+    color: 0xcc0000,
+    roughness: 0.8,
+    metalness: 0.1
+});
+
+/**
+ * DIAL TEXTURE
+ */
+function createSolidDialTexture() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 4096;
+    canvas.height = 512;
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.fillStyle = '#111111';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    ctx.font = `bold 120px "Helvetica Neue", Helvetica, Arial, sans-serif`;
+
+    const totalMinutes = 60;
+    const pixelsPerMin = canvas.width / totalMinutes;
+    const bottomY = canvas.height;
+    const tickHeightLong = 35;
+    const tickHeightShort = 18;
+    const textYOffset = 45;
+
+    for (let i = 0; i < 60; i++) {
+        const x = i * pixelsPerMin;
+        let num = i;
+
+        if (i % 5 === 0) {
+            ctx.fillRect(x - 3, bottomY - tickHeightLong, 6, tickHeightLong);
+            ctx.save();
+            ctx.translate(x, bottomY - textYOffset);
+            ctx.scale(1, 0.45);
+            ctx.fillText(num.toString(), 0, 0);
+            ctx.restore();
+
+            if (i === 0) {
+                ctx.fillRect(canvas.width - 3, bottomY - tickHeightLong, 6, tickHeightLong);
+                ctx.save();
+                ctx.translate(canvas.width, bottomY - textYOffset);
+                ctx.scale(1, 0.45);
+                ctx.fillText(num.toString(), 0, 0);
+                ctx.restore();
+            }
+        } else {
+            ctx.fillRect(x - 1, bottomY - tickHeightShort, 2, tickHeightShort);
+        }
+    }
+
+    const tex = new THREE.CanvasTexture(canvas);
+    tex.anisotropy = 16;
+    tex.wrapS = THREE.RepeatWrapping;
+    tex.repeat.set(1, 1);
+    tex.offset.x = 0.0;
+    return tex;
+}
+
+const solidDialTex = createSolidDialTexture();
+
+const texturedMatte = new THREE.MeshStandardMaterial({
+    map: solidDialTex,
+    roughness: 0.65,
+    metalness: 0.0,
+    bumpMap: noiseTexTop,
+    bumpScale: 0.012
+});
+
+/**
+ * GEOMETRY: The Egg
+ */
+const eggWidthCtrl = 3.6;
+
+const curve = new THREE.CubicBezierCurve(
+    new THREE.Vector2(2.2, 0.0),
+    new THREE.Vector2(eggWidthCtrl, 2.0),
+    new THREE.Vector2(2.5, eggHeight),
+    new THREE.Vector2(0, eggHeight)
+);
+
+curve.v2 = new THREE.Vector2(1.8, eggHeight);
+curve.v3 = new THREE.Vector2(0, eggHeight);
+
+const allPoints = curve.getPoints(120);
+allPoints.unshift(new THREE.Vector2(0, 0));
+
+const bottomPoints = [];
+const topPoints = [];
+let splitAdded = false;
+
+allPoints.forEach((p, i) => {
+    if (p.y < splitHeight) {
+        bottomPoints.push(p);
+    } else {
+        if (!splitAdded) {
+            const prev = allPoints[i - 1];
+            if (prev) {
+                const alpha = (splitHeight - prev.y) / (p.y - prev.y);
+                const rAtSplit = THREE.MathUtils.lerp(prev.x, p.x, alpha);
+                const splitVec = new THREE.Vector2(rAtSplit, splitHeight);
+                bottomPoints.push(splitVec);
+                topPoints.push(splitVec);
+            }
+            splitAdded = true;
+        }
+        topPoints.push(p);
+    }
+});
+
+const baseGeo = new THREE.LatheGeometry(bottomPoints, 64);
+const topGeo = new THREE.LatheGeometry(topPoints, 64);
+
+// MESHES
+const timerGroup = new THREE.Group();
+scene.add(timerGroup);
+timerGroup.position.y = timerGroupY;
+
+const baseMesh = new THREE.Mesh(baseGeo, matteWhite);
+baseMesh.castShadow = true;
+baseMesh.receiveShadow = true;
+timerGroup.add(baseMesh);
+
+const topGroup = new THREE.Group();
+const seamGap = 0.075;
+topGroup.position.y = seamGap;
+timerGroup.add(topGroup);
+
+const topMesh = new THREE.Mesh(topGeo, texturedMatte);
+topMesh.castShadow = true;
+topMesh.receiveShadow = true;
+topGroup.add(topMesh);
+
+// Pointer
+const pointerShape = new THREE.Shape();
+pointerShape.moveTo(-0.12, 0);
+pointerShape.lineTo(0.12, 0);
+pointerShape.lineTo(0, 0.20);
+pointerShape.lineTo(-0.12, 0);
+
+const pointerGeo = new THREE.ExtrudeGeometry(pointerShape, { depth: 0.04, bevelEnabled: false });
+const pointerMesh = new THREE.Mesh(pointerGeo, redMatte);
+
+const radiusAtSeam = bottomPoints[bottomPoints.length - 1].x;
+
+pointerMesh.position.set(0, arrowHeight, radiusAtSeam + 0.05);
+pointerMesh.rotation.x = -0.12;
+baseMesh.add(pointerMesh);
+
+// Caps
+const capGeo = new THREE.CircleGeometry(radiusAtSeam - 0.01, 64);
+const bottomCap = new THREE.Mesh(capGeo, innerMatte);
+bottomCap.rotation.x = -Math.PI / 2;
+bottomCap.position.y = splitHeight;
+baseMesh.add(bottomCap);
+
+const topCap = new THREE.Mesh(capGeo, innerMatte);
+topCap.rotation.x = Math.PI / 2;
+topCap.position.y = splitHeight;
+topGroup.add(topCap);
+
+// Floor
+const planeGeo = new THREE.PlaneGeometry(100, 100);
+const planeMat = new THREE.ShadowMaterial({ opacity: 0.05 });
+const plane = new THREE.Mesh(planeGeo, planeMat);
+plane.rotation.x = -Math.PI / 2;
+plane.position.y = 0;
+timerGroup.add(plane);
+
+const bgPlane = new THREE.Mesh(planeGeo, new THREE.MeshBasicMaterial({ color: 0xe0e0e0 }));
+bgPlane.rotation.x = -Math.PI / 2;
+bgPlane.position.y = -0.1;
+timerGroup.add(bgPlane);
+
+/**
+ * LOGIC & INTERACTION
+ */
+let isDragging = false;
+let targetAngle = 0;
+let visualAngle = 0;
+let timerRunning = false;
+let lastTickTime = 0;
+let lastMouseAngle = 0;
+
+const planeIntersect = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(splitHeight - 3.5));
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+function getMouseAngle(event) {
+    let clientX = event.clientX || (event.touches ? event.touches[0].clientX : 0);
+    let clientY = event.clientY || (event.touches ? event.touches[0].clientY : 0);
+
+    mouse.x = (clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+    const target = new THREE.Vector3();
+    raycaster.ray.intersectPlane(planeIntersect, target);
+
+    if (target) {
+        return Math.atan2(target.x, target.z);
+    }
+    return null;
+}
+
+function updateUI(rad) {
+    let timeRad = -rad;
+    let normRad = timeRad % (Math.PI * 2);
+    if (normRad < 0) normRad += Math.PI * 2;
+
+    let mins = Math.round((normRad / (Math.PI * 2)) * 60);
+    if (mins < 0) mins = 0;
+    if (mins > 60) mins = 60;
+    if (mins === 60) mins = 0;
+    tooltip.innerText = `${mins.toString().padStart(2, '0')}:00`;
+    return mins;
+}
+
+function onDown(e) {
+    e.preventDefault();
+    audio.init();
+    let clientX = e.clientX || (e.touches ? e.touches[0].clientX : 0);
+    let clientY = e.clientY || (e.touches ? e.touches[0].clientY : 0);
+    let pickMouse = new THREE.Vector2();
+    pickMouse.x = (clientX / window.innerWidth) * 2 - 1;
+    pickMouse.y = -(clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(pickMouse, camera);
+    const intersects = raycaster.intersectObject(topMesh);
+
+    if (intersects.length > 0) {
+        isDragging = true;
+        timerRunning = false;
+
+        // Reset zoom on interact
+        targetCamPos.copy(startCamPos);
+        targetLookAt.copy(startLookAt);
+        targetFov = startFov;
+
+        overlay.style.opacity = '0';
+        tooltip.style.opacity = '1';
+        document.body.style.cursor = 'grabbing';
+        const mAngle = getMouseAngle(e);
+        if (mAngle !== null) lastMouseAngle = mAngle;
+    }
+}
+
+function onMove(e) {
+    if (!isDragging) return;
+    e.preventDefault();
+    const currentMouseAngle = getMouseAngle(e);
+
+    if (currentMouseAngle !== null && lastMouseAngle !== null) {
+        let delta = currentMouseAngle - lastMouseAngle;
+        if (delta > Math.PI) delta -= Math.PI * 2;
+        if (delta < -Math.PI) delta += Math.PI * 2;
+        const sensitivity = 0.6;
+        targetAngle += delta * sensitivity;
+        if (targetAngle > 0) targetAngle = 0;
+        if (targetAngle < -Math.PI * 2) targetAngle = -Math.PI * 2;
+        lastMouseAngle = currentMouseAngle;
+    }
+}
+
+function onUp() {
+    if (isDragging) {
+        isDragging = false;
+        const mins = updateUI(targetAngle);
+        if (mins > 0) {
+            timerRunning = true;
+            // ZOOM IN to pointer + numbers
+            targetCamPos.copy(zoomCamPos);
+            targetLookAt.copy(zoomLookAt);
+            targetFov = zoomFov;
+        } else {
+            targetAngle = 0;
+            overlay.style.opacity = '1';
+            // ZOOM OUT
+            targetCamPos.copy(startCamPos);
+            targetLookAt.copy(startLookAt);
+            targetFov = startFov;
+        }
+        tooltip.style.opacity = '0';
+        document.body.style.cursor = 'default';
+    }
+}
+
+window.addEventListener('mousedown', onDown);
+window.addEventListener('mousemove', onMove);
+window.addEventListener('mouseup', onUp);
+window.addEventListener('touchstart', onDown, { passive: false });
+window.addEventListener('touchmove', onMove, { passive: false });
+window.addEventListener('touchend', onUp);
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+document.getElementById('loading').style.display = 'none';
+
+const clock = new THREE.Clock();
+
+function animate() {
+    requestAnimationFrame(animate);
+    const dt = clock.getDelta();
+
+    if (timerRunning) {
+        if (Math.abs(targetAngle) > 0.001) {
+            const speed = (Math.PI * 2) / 3600;
+            if (targetAngle < 0) targetAngle += speed * dt;
+            else targetAngle -= speed * dt;
+
+            const now = Date.now();
+
+            // TICK / TOCK: original speed (~4 per second)
+            if (now - lastTickTime > 250) {
+                audio.playTick();
+                lastTickTime = now;
+            }
+
+            if (Math.abs(targetAngle) < 0.002) {
+                targetAngle = 0;
+                timerRunning = false;
+                audio.playRing();
+                overlay.style.opacity = '1';
+
+                // ZOOM OUT
+                targetCamPos.copy(startCamPos);
+                targetLookAt.copy(startLookAt);
+                targetFov = startFov;
+            }
+        }
+    }
+
+    const smoothing = 0.15;
+    visualAngle += (targetAngle - visualAngle) * smoothing;
+    topGroup.rotation.y = visualAngle;
+
+    // Smooth Camera Animation (Position + LookAt + FOV)
+    const camSpeed = 0.02;
+    currentCamPos.lerp(targetCamPos, camSpeed);
+    currentLookAt.lerp(targetLookAt, camSpeed);
+    currentFov += (targetFov - currentFov) * camSpeed;
+
+    camera.position.copy(currentCamPos);
+    camera.lookAt(currentLookAt);
+    camera.fov = currentFov;
+    camera.updateProjectionMatrix();
+
+    if (isDragging || Math.abs(targetAngle - visualAngle) > 0.001) {
+        updateUI(visualAngle);
+    }
+
+    renderer.render(scene, camera);
+}
+animate();
+
+</script>
+</body>
+</html>
