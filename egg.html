@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
 <title>3D Photorealistic Pomodoro Timer</title>
+
+<!-- Fonts for logo -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Caveat:wght@400;700&family=Comfortaa:wght@300;400;700&display=swap" rel="stylesheet">
+
 <style>
     body {
         margin: 0;
@@ -56,22 +62,39 @@
         font-size: 24px;
     }
 
-    /* --- LOGO WATERMARK STYLE --- */
+    /* --- EGG TIMER LOGO (TOP, FADE OUT) --- */
+    #egg-logo {
+        position: absolute;
+        top: 22px;
+        width: 100%;
+        text-align: center;
+        font-family: 'Caveat', 'Comfortaa', cursive;
+        font-size: 40px;
+        color: rgba(0, 0, 0, 0.8);
+        pointer-events: none;
+        opacity: 0;
+        transition: opacity 0.8s ease;
+        text-shadow: 0 2px 5px rgba(0,0,0,0.15);
+    }
+
+    /* --- INHOUSE LOGO WATERMARK --- */
     #watermark {
         position: absolute;
         bottom: 10px;
         left: 10px;
         display: flex;
         align-items: center;
-        gap: 5px;
-        padding: 5px 10px;
-        background: rgba(255, 255, 255, 0.2);
-        border-radius: 8px;
+        gap: 6px;
+        padding: 0;                /* No box padding feel */
+        background: transparent;   /* NO grey/white box */
+        border-radius: 0;          /* No rounded box */
         color: #111111;
         font-size: 12px;
         font-weight: 500;
         opacity: 0.8;
-        pointer-events: none; /* Ignore mouse events */
+        pointer-events: none;      /* Ignore mouse events */
+        font-family: 'Comfortaa', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        text-transform: lowercase;
     }
     #watermark svg {
         height: 12px;
@@ -90,12 +113,15 @@
 <div id="tooltip">00:00</div>
 <div id="ui-overlay">DRAG TOP TO SET</div>
 
+<!-- Egg Timer logo overlay -->
+<div id="egg-logo">Egg Timer</div>
+
 <!-- Inhouse Software Logo Watermark -->
 <div id="watermark">
     <svg viewBox="0 0 100 60" fill="none" stroke="currentColor" stroke-width="4">
         <path d="M5 55 L50 10 L95 55" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    Inhouse Software
+    inhouse software
 </div>
 
 <script>
@@ -744,6 +770,16 @@ function animate() {
 }
 animate();
 
+// --- EGG LOGO FADE-IN / FADE-OUT ---
+const eggLogo = document.getElementById('egg-logo');
+// Small delay so it appears once everything is ready
+setTimeout(() => {
+    eggLogo.style.opacity = '1';
+    // Show for ~3 seconds, then fade out
+    setTimeout(() => {
+        eggLogo.style.opacity = '0';
+    }, 3000);
+}, 150);
 </script>
 </body>
 </html>
