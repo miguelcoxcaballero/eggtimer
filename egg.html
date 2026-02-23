@@ -19,6 +19,7 @@
         font-family: 'Helvetica Neue', Arial, sans-serif;
         user-select: none;
         -webkit-user-select: none;
+        touch-action: none; /* Prevents default browser actions like zooming/scrolling */
     }
 
     #canvas-container {
@@ -85,21 +86,21 @@
         display: flex;
         align-items: center;
         gap: 6px;
-        padding: 0;                /* No box padding feel */
-        background: transparent;   /* NO grey/white box */
-        border-radius: 0;          /* No rounded box */
+        padding: 0;
+        background: transparent;
+        border-radius: 0;
         color: #111111;
         font-size: 12px;
         font-weight: 500;
         opacity: 0.8;
-        pointer-events: none;      /* Ignore mouse events */
+        pointer-events: none;
         font-family: 'Comfortaa', system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         text-transform: lowercase;
     }
     #watermark svg {
         height: 12px;
         width: 15px;
-        stroke: #cc0000; /* Matching pointer red */
+        stroke: #cc0000;
         stroke-width: 5;
     }
 </style>
@@ -111,7 +112,7 @@
 <div id="loading" class="loading">Loading Timer...</div>
 <div id="canvas-container"></div>
 <div id="tooltip">00:00</div>
-<div id="ui-overlay">DRAG TOP TO SET</div>
+<div id="ui-overlay">SWIPE LEFT/RIGHT TO SET</div>
 
 <!-- Egg Timer logo overlay -->
 <div id="egg-logo">Egg Timer</div>
@@ -127,15 +128,15 @@
 <script>
 /**
  * AUDIO SYSTEM
- * - Tick/tock: mouse-click style, noise only (no pitched osc).
- * - Ring: classic digital alarm.
+ * - Tick/tock: mouse-click style, noise only.
+ * - Bell: Additive synthesis for a pleasant, resonating meditation chime.
  */
 class SoundEngine {
     constructor() {
         this.ctx = null;
         this.initialized = false;
-        this.tickToggle = false;   // false = tick, true = tock
-        this.clickBuffer = null;   // shared noise buffer for clicks
+        this.tickToggle = false;
+        this.clickBuffer = null;
     }
 
     init() {
@@ -150,25 +151,18 @@ class SoundEngine {
     _createClickBuffer() {
         if (!this.ctx || this.clickBuffer) return;
         const sampleRate = this.ctx.sampleRate;
-        const length = Math.floor(sampleRate * 0.02); // ~20 ms of noise
+        const length = Math.floor(sampleRate * 0.02);
         const buffer = this.ctx.createBuffer(1, length, sampleRate);
         const data = buffer.getChannelData(0);
 
-        // Short white noise burst with very fast decay.
         for (let i = 0; i < length; i++) {
-            const env = 1 - i / length;    // linear decay
+            const env = 1 - i / length;
             data[i] = (Math.random() * 2 - 1) * env;
         }
 
         this.clickBuffer = buffer;
     }
 
-    /**
-     * Mouse-click style sound:
-     * - High-passed noise only
-     * - Very short envelope
-     * variant 0 = tick, 1 = tock (subtle differences)
-     */
     _mouseClick(time, variant) {
         const ctx = this.ctx;
         const src = ctx.createBufferSource();
@@ -176,14 +170,11 @@ class SoundEngine {
 
         const filter = ctx.createBiquadFilter();
         filter.type = 'highpass';
-        // Slight difference in cutoff so tick/tock feel a bit different,
-        // but not “pitchy”.
         filter.frequency.setValueAtTime(variant ? 1800 : 2300, time);
         filter.Q.setValueAtTime(0.7, time);
 
         const gain = ctx.createGain();
         gain.gain.setValueAtTime(0.0, time);
-        // Very fast attack then quick decay – feels like a mechanical click.
         const peak = time + 0.002;
         const release = time + 0.03;
         gain.gain.linearRampToValueAtTime(variant ? 0.45 : 0.55, peak);
@@ -197,9 +188,6 @@ class SoundEngine {
         src.stop(time + 0.04);
     }
 
-    /**
-     * Alternating tick/tock using mouse-click sound.
-     */
     playTick() {
         if (!this.initialized || !this.clickBuffer) return;
         const t = this.ctx.currentTime;
@@ -208,51 +196,57 @@ class SoundEngine {
     }
 
     /**
-     * Classic alarm clock style: square double-tone with pulsed amplitude.
+     * Classic electronic phone ring
      */
-    playRing() {
+    playPhoneRing() {
         if (!this.initialized) return;
 
         const t = this.ctx.currentTime;
-        const duration = 4.0; // total alarm length in seconds
+        
+        // Ring twice with a short pause
+        this._ringBurst(t, 1.2);
+        this._ringBurst(t + 1.6, 1.2);
+    }
 
+    _ringBurst(startTime, duration) {
+        // Two oscillators for a slightly dissonant, classic telephone chord
         const osc1 = this.ctx.createOscillator();
         const osc2 = this.ctx.createOscillator();
         osc1.type = 'square';
         osc2.type = 'square';
+        osc1.frequency.setValueAtTime(550, startTime);
+        osc2.frequency.setValueAtTime(650, startTime);
 
-        // Alarm-ish frequencies
-        osc1.frequency.setValueAtTime(900, t);
-        osc2.frequency.setValueAtTime(1200, t);
+        // LFO for the rapid mechanical "brrrrr" clapper effect
+        const lfo = this.ctx.createOscillator();
+        lfo.type = 'sine';
+        lfo.frequency.setValueAtTime(25, startTime); // 25 Hz stutter
 
-        const gain = this.ctx.createGain();
-        gain.gain.setValueAtTime(0, t);
+        const lfoGain = this.ctx.createGain();
+        lfoGain.gain.setValueAtTime(0.5, startTime);
+        
+        const lfoAmount = this.ctx.createGain();
+        lfoAmount.gain.setValueAtTime(0.5, startTime);
+        lfo.connect(lfoAmount);
+        lfoAmount.connect(lfoGain.gain);
 
-        const pulsePeriod = 0.4;  // time between pulses
-        const attack = 0.01;
-        const hold = 0.18;
+        const masterGain = this.ctx.createGain();
+        masterGain.gain.setValueAtTime(0, startTime);
+        masterGain.gain.linearRampToValueAtTime(0.15, startTime + 0.05);
+        masterGain.gain.setValueAtTime(0.15, startTime + duration - 0.05);
+        masterGain.gain.linearRampToValueAtTime(0, startTime + duration);
 
-        let currentTime = t;
-        while (currentTime < t + duration) {
-            const onTime = currentTime;
-            const peakTime = onTime + attack;
-            const offTime = onTime + hold;
+        osc1.connect(lfoGain);
+        osc2.connect(lfoGain);
+        lfoGain.connect(masterGain);
+        masterGain.connect(this.ctx.destination);
 
-            gain.gain.setValueAtTime(0.0, onTime);
-            gain.gain.linearRampToValueAtTime(0.9, peakTime);
-            gain.gain.linearRampToValueAtTime(0.0, offTime);
-
-            currentTime += pulsePeriod;
-        }
-
-        osc1.connect(gain);
-        osc2.connect(gain);
-        gain.connect(this.ctx.destination);
-
-        osc1.start(t);
-        osc2.start(t);
-        osc1.stop(t + duration + 0.1);
-        osc2.stop(t + duration + 0.1);
+        osc1.start(startTime);
+        osc2.start(startTime);
+        lfo.start(startTime);
+        osc1.stop(startTime + duration);
+        osc2.stop(startTime + duration);
+        lfo.stop(startTime + duration);
     }
 }
 
@@ -272,39 +266,22 @@ scene.fog = new THREE.Fog(0xd0d0d0, 20, 60);
 // CONSTANTS FOR EGG GEOMETRY
 const eggHeight = 6.2;
 const splitHeight = 2.6;
-const arrowHeight = splitHeight - 0.35; // local Y position of the red pointer's tip
+const arrowHeight = splitHeight - 0.35; 
 
-// Vertical offset of the whole timer group in world space
 const timerGroupY = -3.0;
 
 // --- CAMERA CONFIGURATION ---
-
-// 1. Start (full-egg) view
 const startFov = 60;
 const startLookAt = new THREE.Vector3(0, 2.5, 0);
 const startCamPos = new THREE.Vector3(0, 7.5, 13.5);
 
-// 2. Zoom View Parameters (computed so pointer + dial are nicely framed)
+const pointerWorldY = timerGroupY + arrowHeight;
+const dialWorldY    = timerGroupY + splitHeight;
+const zoomCenterY = (pointerWorldY + dialWorldY) * 0.5;
 
-// World Y of pointer tip and dial ring
-const pointerWorldY = timerGroupY + arrowHeight;     // ~ -0.75
-const dialWorldY    = timerGroupY + splitHeight;     // ~ -0.40
-
-// Center of the focus between pointer and dial
-const zoomCenterY = (pointerWorldY + dialWorldY) * 0.5; // ~ -0.575
-
-// Less zoom (wider angle) than before, but still closer than start view
 const zoomFov = 40;
-
-// Look directly at the mid point between numbers and red triangle
 const zoomLookAt = new THREE.Vector3(0, zoomCenterY, 0);
-
-// Place camera a bit above and in front of that region
-const zoomCamPos = new THREE.Vector3(
-    0,
-    zoomCenterY + 2.0, // slightly above
-    8.5                // farther than before for softer zoom
-);
+const zoomCamPos = new THREE.Vector3(0, zoomCenterY + 2.0, 8.5);
 
 const camera = new THREE.PerspectiveCamera(startFov, window.innerWidth / window.innerHeight, 0.1, 100);
 camera.position.copy(startCamPos);
@@ -388,14 +365,9 @@ const noiseTexBottom = createNoiseTexture();
 const noiseTexTop = createNoiseTexture();
 
 const density = 0.6;
-// Coarser grain on bottom
 noiseTexBottom.repeat.set(2, 2 * density);
-// Finer grain on top dial
 noiseTexTop.repeat.set(12, 12 * density);
 
-/**
- * MATERIALS
- */
 const matteWhite = new THREE.MeshStandardMaterial({
     color: 0xeeeeee,
     roughness: 0.65,
@@ -430,8 +402,7 @@ function createSolidDialTexture() {
     ctx.textBaseline = 'bottom';
     ctx.font = `bold 120px "Helvetica Neue", Helvetica, Arial, sans-serif`;
 
-    const totalMinutes = 60;
-    const pixelsPerMin = canvas.width / totalMinutes;
+    const pixelsPerMin = canvas.width / 60;
     const bottomY = canvas.height;
     const tickHeightLong = 35;
     const tickHeightShort = 18;
@@ -593,27 +564,20 @@ let targetAngle = 0;
 let visualAngle = 0;
 let timerRunning = false;
 let lastTickTime = 0;
-let lastMouseAngle = 0;
 
-const planeIntersect = new THREE.Plane(new THREE.Vector3(0, 1, 0), -(splitHeight - 3.5));
+// Variables for horizontal drag
+let startX = 0;
+let startAngle = 0;
+
 const raycaster = new THREE.Raycaster();
-const mouse = new THREE.Vector2();
 
-function getMouseAngle(event) {
-    let clientX = event.clientX || (event.touches ? event.touches[0].clientX : 0);
-    let clientY = event.clientY || (event.touches ? event.touches[0].clientY : 0);
-
-    mouse.x = (clientX / window.innerWidth) * 2 - 1;
-    mouse.y = -(clientY / window.innerHeight) * 2 + 1;
-
-    raycaster.setFromCamera(mouse, camera);
-    const target = new THREE.Vector3();
-    raycaster.ray.intersectPlane(planeIntersect, target);
-
-    if (target) {
-        return Math.atan2(target.x, target.z);
+function getClientX(e) {
+    if (e.changedTouches && e.changedTouches.length > 0) {
+        return e.changedTouches[0].clientX;
+    } else if (e.touches && e.touches.length > 0) {
+        return e.touches[0].clientX;
     }
-    return null;
+    return e.clientX || 0;
 }
 
 function updateUI(rad) {
@@ -630,10 +594,12 @@ function updateUI(rad) {
 }
 
 function onDown(e) {
-    e.preventDefault();
     audio.init();
-    let clientX = e.clientX || (e.touches ? e.touches[0].clientX : 0);
-    let clientY = e.clientY || (e.touches ? e.touches[0].clientY : 0);
+    
+    // Convert click/touch position to normalized device coordinates
+    let clientX = getClientX(e);
+    let clientY = e.clientY || (e.touches && e.touches.length > 0 ? e.touches[0].clientY : 0);
+    
     let pickMouse = new THREE.Vector2();
     pickMouse.x = (clientX / window.innerWidth) * 2 - 1;
     pickMouse.y = -(clientY / window.innerHeight) * 2 + 1;
@@ -642,6 +608,7 @@ function onDown(e) {
     const intersects = raycaster.intersectObject(topMesh);
 
     if (intersects.length > 0) {
+        e.preventDefault();
         isDragging = true;
         timerRunning = false;
 
@@ -653,29 +620,32 @@ function onDown(e) {
         overlay.style.opacity = '0';
         tooltip.style.opacity = '1';
         document.body.style.cursor = 'grabbing';
-        const mAngle = getMouseAngle(e);
-        if (mAngle !== null) lastMouseAngle = mAngle;
+        
+        // Record starting positions for linear horizontal dragging
+        startX = clientX;
+        startAngle = targetAngle;
     }
 }
 
 function onMove(e) {
     if (!isDragging) return;
     e.preventDefault();
-    const currentMouseAngle = getMouseAngle(e);
+    
+    const currentX = getClientX(e);
+    const deltaX = currentX - startX;
 
-    if (currentMouseAngle !== null && lastMouseAngle !== null) {
-        let delta = currentMouseAngle - lastMouseAngle;
-        if (delta > Math.PI) delta -= Math.PI * 2;
-        if (delta < -Math.PI) delta += Math.PI * 2;
-        const sensitivity = 0.6;
-        targetAngle += delta * sensitivity;
-        if (targetAngle > 0) targetAngle = 0;
-        if (targetAngle < -Math.PI * 2) targetAngle = -Math.PI * 2;
-        lastMouseAngle = currentMouseAngle;
-    }
+    // Moving right (positive delta) -> Reversed direction to match expectations
+    // Dragging 80% of the screen width equals a full 60 minute rotation
+    const sensitivity = (Math.PI * 2) / (window.innerWidth * 0.8);
+    
+    targetAngle = startAngle + (deltaX * sensitivity);
+
+    // Clamp between 0 and 60 minutes
+    if (targetAngle > 0) targetAngle = 0;
+    if (targetAngle < -Math.PI * 2) targetAngle = -Math.PI * 2;
 }
 
-function onUp() {
+function onUp(e) {
     if (isDragging) {
         isDragging = false;
         const mins = updateUI(targetAngle);
@@ -698,8 +668,8 @@ function onUp() {
     }
 }
 
-window.addEventListener('mousedown', onDown);
-window.addEventListener('mousemove', onMove);
+window.addEventListener('mousedown', onDown, { passive: false });
+window.addEventListener('mousemove', onMove, { passive: false });
 window.addEventListener('mouseup', onUp);
 window.addEventListener('touchstart', onDown, { passive: false });
 window.addEventListener('touchmove', onMove, { passive: false });
@@ -727,7 +697,6 @@ function animate() {
 
             const now = Date.now();
 
-            // TICK / TOCK: original speed (~4 per second)
             if (now - lastTickTime > 250) {
                 audio.playTick();
                 lastTickTime = now;
@@ -736,7 +705,7 @@ function animate() {
             if (Math.abs(targetAngle) < 0.002) {
                 targetAngle = 0;
                 timerRunning = false;
-                audio.playRing();
+                audio.playPhoneRing(); // Using the new phone ring!
                 overlay.style.opacity = '1';
 
                 // ZOOM OUT
@@ -772,10 +741,8 @@ animate();
 
 // --- EGG LOGO FADE-IN / FADE-OUT ---
 const eggLogo = document.getElementById('egg-logo');
-// Small delay so it appears once everything is ready
 setTimeout(() => {
     eggLogo.style.opacity = '1';
-    // Show for ~3 seconds, then fade out
     setTimeout(() => {
         eggLogo.style.opacity = '0';
     }, 3000);
